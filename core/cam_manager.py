@@ -7,10 +7,34 @@ import numpy as np
 from utils.logger import Logger, set_global_log_level_by_name
 import cv2
 import time
+from line_profiler import profile
+from numba import jit, njit
+
+
 
 logger = Logger(__name__)
 set_global_log_level_by_name("INFO")
 
+def process_frame_gpu(raw_frame, pixel_format):
+    """
+    GPU-accelerated frame processing using CuPy.
+    Only used in _callback_thread.
+    """
+    
+
+
+    # Determine bit depth from pixel format
+    max_value = 255.0 if "8" in pixel_format else 4095.0
+    
+    if len(raw_frame.shape) == 2:  # Raw Bayer data      
+        height, width = raw_frame.shape
+        
+        # demosaic via opencv debayering
+        result = cv2.cvtColor(raw_frame, cv2.COLOR_BayerRG2RGB)
+        cv2.normalize(result, result, 0, 1, cv2.NORM_MINMAX, dtype=cv2.CV_32F)
+        return result.flatten()
+
+      
 ''' CamManager class 
     This class is used to manage/connect to Basler Cameras
 ''' 
@@ -32,7 +56,10 @@ class CamManager:
         self._frame_lock = threading.Lock()  # Thread safety for frame access
         self._is_new_frame = False
         self._frame_ready_event = threading.Event()
-       
+        self._norm_buf = None
+        
+        
+
 
     def list_cameras(self):
         # return a list of available cameras (index, model_name, serial_no)
@@ -87,6 +114,8 @@ class CamManager:
         
         self._stop_event.clear()
         self._frame_count = 0
+        self._gpu_failure_count = 0  # Track GPU failures
+        self._max_gpu_failures = 3  # Switch to CPU after 3 failures
         self._capture_thread = threading.Thread(target=self._callback_thread)
         self._capture_thread.start()
         logger.info("Started capturing")
@@ -105,38 +134,56 @@ class CamManager:
     def _callback_thread(self):
         '''
         Thread to handle the callback from the camera
+        Measures the time between loops and logs it in ms and FPS.
         '''
-      
+        prev_time = time.time()
         while not self._stop_event.is_set():
 
             grabResult = self.current_cam.RetrieveResult(5000)
             if grabResult.GrabSucceeded():
-                
                 # Thread-safe frame processing
                 with self._frame_lock:
                     self._raw_frame = grabResult.GetArray()
-                    self._raw_frame = cv2.cvtColor(self._raw_frame, cv2.COLOR_BAYER_RG2RGB)
-                    # flip rows with columns
                     
+                    # Use GPU acceleration if available, otherwise fallback to CPU
+                    
+                    
+                    self._processed_frame = self.process_frame(self._raw_frame)
 
-                    self._processed_frame = self._raw_frame.astype('float32') 
-                    # normalize from 12bit to float 0-1
-                    self._processed_frame = self._processed_frame / 4095.0
-                    self._processed_frame = self._processed_frame.flatten()
-                    self._is_new_frame = True
-                    
                 
-                # Signal that a new frame is ready
-                time.sleep(0.25)
-                self._frame_ready_event.set()
+                    self._is_new_frame = True
 
-                self._frame_count += 1                
+                self._frame_ready_event.set()
+                self._frame_count += 1
+
+                # Measure and log timing
+                curr_time = time.time()
+                loop_time = curr_time - prev_time
+                prev_time = curr_time
+                ms = loop_time * 1000 if loop_time > 0 else 0.0
+                fps = 1.0 / loop_time if loop_time > 0 else 0.0
+
+                logger.info(f"Capture loop: {ms:.2f} ms | {fps:.2f} FPS")
+                
             else:
                 logger.error("Error: Could not grab image")
                 break
-            
+
             grabResult.Release()
- 
+    
+    @profile
+    def process_frame(self, raw_frame):
+        '''
+        Process the raw frame to be used in the GUI
+        Process: (1) Demosaic from BayerRG to RGB
+                (2) Normalize to 0-1 range
+                (3) Return the processed frame as a flattened array
+        '''
+        self.scale = 1.0 / 4095.0         
+  
+        rgb = cv2.cvtColor(raw_frame, cv2.COLOR_BayerRG2RGB)
+        rgb = cv2.normalize(rgb, None, alpha=0, beta=1.0, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_32F)
+        return rgb.ravel()
        
 
     # ---- camera settings ----

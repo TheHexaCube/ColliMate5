@@ -5,6 +5,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import dearpygui.dearpygui as dpg
+import cupy
 
 from core.cam_manager import CamManager
 from core.image_processing import ROILine
@@ -13,8 +14,8 @@ from utils.logger import Logger, set_global_log_level_by_name
 import numpy as np
 import threading
 
-logger = Logger(__name__)
 
+logger = Logger(__name__)
 
 class MainWindow:
     def __init__(self):
@@ -51,7 +52,7 @@ class MainWindow:
                 format=dpg.mvFormat_Float_rgb
             )
 
-        with dpg.window(label="Main Window", tag="MainWindow"):
+        with dpg.window(label="Video Window", tag="MainWindow"):
 
             # Provide the list of labels, and pass nothing for user_data (if needed, use user_data)
             dpg.add_combo(items=self.camera_labels, callback=self.camera_combo_callback)
@@ -66,8 +67,9 @@ class MainWindow:
 
                 dpg.add_image_series('texture', bounds_min=(0, 0), bounds_max=(self.video_width, self.video_height), parent='y_axis', tag='image_series')
                 #line_id = dpg.draw_line([0, 0], [self.video_width, self.video_height], color=[255, 0, 0])
-                self.roi_line = ROILine((0, 0), (self.video_width, self.video_height), (255, 0, 0))
+                self.roi_line = ROILine((50, 0), (50, self.video_height), (255, 0, 0))
 
+        with dpg.window(label="ROI Window", tag="ROIWindow"):
             with dpg.plot(label="ROI Line", height=500, width=500, equal_aspects=True):
                 dpg.add_plot_axis(dpg.mvXAxis, label="x2")
                 dpg.add_plot_axis(dpg.mvYAxis, label="y2", tag="y_axis2")
@@ -82,7 +84,7 @@ class MainWindow:
                # self.ROI_data = dpg.add_line_series(x=np.arange(0, self.video_width), y=np.zeros(self.video_width), tag='line_series', parent='y_axis2')
                 
 
-        dpg.set_primary_window("MainWindow", True)
+        #dpg.set_primary_window("MainWindow", True)
 
         with dpg.handler_registry():
             dpg.add_key_press_handler(callback=self.key_press_callback)
@@ -119,41 +121,40 @@ class MainWindow:
         """
         Worker thread for updating texture in the background
         """
+        frame_count = 0
         
         while not self._stop_texture_update.is_set():
-            # Wait for camera to signal new frame (with timeout to allow checking stop event)
-            if self.cam._frame_ready_event.wait(timeout=0.1):
-                processed_frame = self.cam.get_processed_frame()
-                if processed_frame is not None:
-                    # Make a thread-safe copy and update texture
-                    with self._texture_lock:                        
-                        self.frame_buffer = np.copy(processed_frame)
-                        # get width and height of frame, check if they are the same as _video_width and _video_height and if not, update the texture size
-                        width, height = self.cam.get_resolution()
-                        if width != self.video_width or height != self.video_height:
-                            self.video_width = width
-                            self.video_height = height
-
-                            dpg.configure_item(self.texture, width=self.video_width, height=self.video_height)
-                            dpg.configure_item('image_series', bounds_min=(0, 0), bounds_max=(self.video_width, self.video_height))
-
+            try:
+                # Wait for camera to signal new frame (with timeout to allow checking stop event)
+                if self.cam._frame_ready_event.wait(timeout=0.1):
+                    
+                    processed_frame = self.cam.get_processed_frame()
+                    if processed_frame is not None:
                         
-                        #if self.roi_line is not None:
-                            #self.roi_line.set_image(self.cam.get_raw_frame())
-
-                            #print(f"Line start/end: {self.roi_line.get_position()}")
-                            #print(f"Raw Img Dimensions: {self.cam.get_raw_frame().shape}")
-
-                            #data = self.roi_line.get_roi_values()
-                            # convert data to float
-                            #dpg.set_value('line_series', [np.arange(0, self.video_width).astype(float), data.astype(float)])
-                            # set the roi_line values to plot
-
+                        frame_count += 1
                         
-                        
-                        dpg.set_value(self.texture, self.frame_buffer)
+                        # Make a thread-safe copy and update texture
+                        with self._texture_lock:  
+                                                
+                            # get width and height of frame, check if they are the same as _video_width and _video_height and if not, update the texture size
+                            width, height = self.cam.get_resolution()
+                            if width != self.video_width or height != self.video_height:
+                                self.video_width = width
+                                self.video_height = height
 
+                                dpg.configure_item(self.texture, width=self.video_width, height=self.video_height)
+                                dpg.configure_item('image_series', bounds_min=(0, 0), bounds_max=(self.video_width, self.video_height))
+
+                            dpg.set_value(self.texture, processed_frame)
+                            
+                            # Log every 30 frames to track texture updates
+                            if frame_count % 30 == 0:
+                                logger.debug(f"Texture updated for frame {frame_count}")
+                            
                         # get the position of the roi line
+            except Exception as e:
+                logger.error(f"Error in texture update worker: {e}")
+                # Continue running even if one frame fails
             
                     
                 

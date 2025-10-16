@@ -1,0 +1,12 @@
+# Core dependencies for ColliMate5 autocollimator
+numpy
+opencv-python
+pypylon
+dearpygui
+
+# Performance optimization (optional but recommended)
+numba>=0.56.0
+cupy-cuda12x
+
+# Development dependencies (optional)
+pytest
