@@ -25,20 +25,23 @@ class FrameBuffer:
         self.total_processed_frames = 0
 
     def put_raw_frame(self, raw_frame):
+        self.total_raw_frames += 1
         try:
             self.raw_queue.put_nowait(raw_frame)           
-            self.total_raw_frames += 1
+            
         except Full:
+            logger.warning(f"Forced to drop raw frame after {self.raw_consec_ctr} consecutive frames. Total dropped: {self.raw_drop_ctr}. Total frames: {self.total_raw_frames}, Dropped percentage: {self.raw_drop_ctr / self.total_raw_frames * 100}%")
             self.raw_drop_ctr += 1
             self.raw_consec_ctr = 0
-            logger.warning(f"Forced to drop raw frame after {self.raw_consec_ctr} consecutive frames. Total dropped: {self.raw_drop_ctr}. Total frames: {self.total_raw_frames}, Dropped percentage: {self.raw_drop_ctr / self.total_raw_frames * 100}%")
+            
         else:
             self.raw_consec_ctr += 1
 
     def put_processed_frame(self, processed_frame):
+        self.total_processed_frames += 1
         try:
-            self.processed_queue.put_nowait(processed_frame)
-            self.total_processed_frames += 1
+            self.processed_queue.put_nowait(processed_frame)            
+            
         except Full:
             logger.warning(f"Forced to drop processed frame after {self.processed_consec_ctr} consecutive frames. Total dropped: {self.processed_drop_ctr}. Total frames: {self.total_processed_frames}, Dropped percentage: {self.processed_drop_ctr / self.total_processed_frames * 100}%")
             self.processed_drop_ctr += 1

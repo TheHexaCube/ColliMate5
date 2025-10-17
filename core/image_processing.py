@@ -5,6 +5,7 @@ from utils.logger import Logger, set_global_log_level_by_name
 import threading
 import time
 import cv2
+from line_profiler import profile
 
 logger = Logger(__name__)
 set_global_log_level_by_name("INFO")
@@ -54,7 +55,8 @@ class ImageProcessor:
     def stop(self):
         self.stop_event.set()
         self.thread.join()
-    
+
+    @profile
     def process_frame(self):
         while not self.stop_event.is_set():
             raw_frame = self.frame_buffer.get_raw_frame()
@@ -63,6 +65,7 @@ class ImageProcessor:
                 
                 rgb_frame = cv2.cvtColor(raw_frame, cv2.COLOR_BayerRG2RGB)
                 rgb_frame = cv2.normalize(rgb_frame, None, 0.0, 1.0, cv2.NORM_MINMAX, dtype=cv2.CV_32F)
+                #rgb_frame = rgb_frame.astype(np.float32) * (1/4096.0) # 28.8ms
 
                 self.frame_buffer.put_processed_frame(rgb_frame)
                 #print(f"Processed frame: {rgb_frame.shape}")
