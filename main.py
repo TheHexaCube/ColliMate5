@@ -1,5 +1,5 @@
-import cv2
-import numpy as np
-import time
+from testing.video_test import MainWindow
 
-print("CUDA build:", cv2.getBuildInformation())
+if __name__ == "__main__":
+    main_window = MainWindow()
+    main_window.run()

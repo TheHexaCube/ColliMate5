@@ -10,54 +10,36 @@ import time
 from line_profiler import profile
 from numba import jit, njit
 
+#set environment variable for pylon
+os.environ["PYLON_CAMEMU"] = "1"
+
 
 
 logger = Logger(__name__)
 set_global_log_level_by_name("INFO")
 
-def process_frame_gpu(raw_frame, pixel_format):
-    """
-    GPU-accelerated frame processing using CuPy.
-    Only used in _callback_thread.
-    """
-    
 
-
-    # Determine bit depth from pixel format
-    max_value = 255.0 if "8" in pixel_format else 4095.0
-    
-    if len(raw_frame.shape) == 2:  # Raw Bayer data      
-        height, width = raw_frame.shape
-        
-        # demosaic via opencv debayering
-        result = cv2.cvtColor(raw_frame, cv2.COLOR_BayerRG2RGB)
-        cv2.normalize(result, result, 0, 1, cv2.NORM_MINMAX, dtype=cv2.CV_32F)
-        return result.flatten()
 
       
 ''' CamManager class 
     This class is used to manage/connect to Basler Cameras
 ''' 
 class CamManager:
-    def __init__(self):
+    def __init__(self, frame_buffer):
         self.tl_factory = pylon.TlFactory.GetInstance()
         self.devices = self.tl_factory.EnumerateDevices()
         self.current_cam = None
+
         self._capture_thread = None
         self._stop_event = threading.Event()
+
         self._frame_count = 0
 
-        self._raw_frame = None
-        self._processed_frame = None
 
         self._width = None
         self._height = None
 
-        self._frame_lock = threading.Lock()  # Thread safety for frame access
-        self._is_new_frame = False
-        self._frame_ready_event = threading.Event()
-        self._norm_buf = None
-        
+        self.frame_buffer = frame_buffer
         
 
 
@@ -79,6 +61,18 @@ class CamManager:
 
         self.current_cam = pylon.InstantCamera(self.tl_factory.CreateDevice(self.devices[index]))
         self.current_cam.Open()
+        #check if camera is emulated
+        if self.current_cam.GetDeviceInfo().GetModelName() == "Emulation":
+            logger.warning("Camera is emulated")
+            self.current_cam.PixelFormat.Value = "BayerRG12"
+            self.current_cam.Width.Value = 2048
+            self.current_cam.Height.Value = 1536
+            self.current_cam.ExposureTime.Value = 100
+            self.current_cam.Gain.Value = 0
+            self.current_cam.AcquisitionFrameRateEnable.Value = True
+            self.current_cam.AcquisitionFrameRate.Value = 55
+
+            return
         logger.info(f"Connected to camera: {self.current_cam.GetDeviceInfo().GetModelName()}")  
         
 
@@ -125,66 +119,25 @@ class CamManager:
         Stop capturing
         '''
         if self._capture_thread and self._capture_thread.is_alive():
-            self._stop_event.set()
-            self._frame_ready_event.set()  # Wake up any waiting threads
+            self._stop_event.set()  
             self._capture_thread.join()
             self._capture_thread = None
+            self.current_cam.StopGrabbing()
             logger.info("Stopped capturing")
 
     def _callback_thread(self):
         '''
         Thread to handle the callback from the camera
-        Measures the time between loops and logs it in ms and FPS.
-        '''
-        prev_time = time.time()
+        Measures the time between loops and logs it in ms and FPS.        '''
+        
         while not self._stop_event.is_set():
 
             grabResult = self.current_cam.RetrieveResult(5000)
-            if grabResult.GrabSucceeded():
-                # Thread-safe frame processing
-                with self._frame_lock:
-                    self._raw_frame = grabResult.GetArray()
-                    
-                    # Use GPU acceleration if available, otherwise fallback to CPU
-                    
-                    
-                    self._processed_frame = self.process_frame(self._raw_frame)
-
+            if grabResult.GrabSucceeded():                
+                self.frame_buffer.put_raw_frame(grabResult.GetArray())
                 
-                    self._is_new_frame = True
-
-                self._frame_ready_event.set()
-                self._frame_count += 1
-
-                # Measure and log timing
-                curr_time = time.time()
-                loop_time = curr_time - prev_time
-                prev_time = curr_time
-                ms = loop_time * 1000 if loop_time > 0 else 0.0
-                fps = 1.0 / loop_time if loop_time > 0 else 0.0
-
-                logger.info(f"Capture loop: {ms:.2f} ms | {fps:.2f} FPS")
-                
-            else:
-                logger.error("Error: Could not grab image")
-                break
-
             grabResult.Release()
     
-    @profile
-    def process_frame(self, raw_frame):
-        '''
-        Process the raw frame to be used in the GUI
-        Process: (1) Demosaic from BayerRG to RGB
-                (2) Normalize to 0-1 range
-                (3) Return the processed frame as a flattened array
-        '''
-        self.scale = 1.0 / 4095.0         
-  
-        rgb = cv2.cvtColor(raw_frame, cv2.COLOR_BayerRG2RGB)
-        rgb = cv2.normalize(rgb, None, alpha=0, beta=1.0, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_32F)
-        return rgb.ravel()
-       
 
     # ---- camera settings ----
 
@@ -226,30 +179,6 @@ class CamManager:
         Check if the camera is capturing
         '''
         return self._capture_thread is not None and self._capture_thread.is_alive()
-    
-    def get_raw_frame(self):
-        '''
-        Get the raw frame from the camera (thread-safe)
-        '''
-        with self._frame_lock:            
-                if self._raw_frame is not None:
-                    self._is_new_frame = False
-                    return self._raw_frame.copy()
-                else:
-                    return None
-        
-    def get_processed_frame(self):
-        '''
-        Get the processed frame from the camera (thread-safe)
-        '''
-        with self._frame_lock:            
-            if self._processed_frame is not None:
-                self._is_new_frame = False
-                self._frame_ready_event.clear()  # Reset for next frame
-                return self._processed_frame.copy()
-            else:
-                return None
-  
     
     def get_resolution(self):
         '''

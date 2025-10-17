@@ -13,18 +13,27 @@ import time
 from utils.logger import Logger, set_global_log_level_by_name
 import numpy as np
 import threading
-
+from queue import Queue
+from core.framebuffer import FrameBuffer
+from core.image_processing import ImageProcessor
 
 logger = Logger(__name__)
+
+
+
 
 class MainWindow:
     def __init__(self):
         dpg.create_context()
-        dpg.create_viewport(title='Video Test', width=1280, height=720)
+        dpg.create_viewport(title='Video Test', width=900, height=720)
         dpg.setup_dearpygui()
 
-        self.cam = CamManager()
         
+        self.frame_buffer = FrameBuffer()
+        self.cam = CamManager(self.frame_buffer)
+        self.image_processor = ImageProcessor(self.frame_buffer)
+
+
         dpg.set_viewport_vsync(False)
 
         # Store cameras and create list of labels for the combo
@@ -35,20 +44,20 @@ class MainWindow:
         # Display configuration
         self.video_width = 2048     
         self.video_height = 1536
-        self.frame_buffer = np.zeros((self.video_height, self.video_width, 3), dtype=np.float32)
-        print(f"Frame info: ndim={self.frame_buffer.ndim}, shape={self.frame_buffer.shape}, dtype={self.frame_buffer.dtype}, size={self.frame_buffer.size}")
+        self.texture_data = np.zeros((self.video_height, self.video_width, 3), dtype=np.float32)
+        print(f"Frame info: ndim={self.texture_data.ndim}, shape={self.texture_data.shape}, dtype={self.texture_data.dtype}, size={self.texture_data.size}")
         
         # Threading for texture updates
         self._texture_update_thread = None
         self._stop_texture_update = threading.Event()
         self._texture_lock = threading.Lock()
         
-        with dpg.texture_registry(show=True):
+        with dpg.texture_registry():
             # Use raw texture for highest performance
             self.texture = dpg.add_raw_texture(tag='texture',
                 width=self.video_width, 
                 height=self.video_height, 
-                default_value=self.frame_buffer, 
+                default_value=self.texture_data, 
                 format=dpg.mvFormat_Float_rgb
             )
 
@@ -56,11 +65,11 @@ class MainWindow:
 
             # Provide the list of labels, and pass nothing for user_data (if needed, use user_data)
             dpg.add_combo(items=self.camera_labels, callback=self.camera_combo_callback)
-            dpg.add_button(label="Start Capture", callback=self.cam.start_capture)
-            dpg.add_button(label="Stop Capture", callback=self.cam.stop_capture)
+            self.start_capture_button = dpg.add_button(label="Start Capture", callback=self.start_button_callback)
+            self.stop_capture_button = dpg.add_button(label="Stop Capture", callback=self.start_button_callback)
             # generate placeholder image
             #dpg.add_image(self.texture, height=750, width=1000)
-            with dpg.plot(label="Frame Rate", height=500, width=500, equal_aspects=True):
+            with dpg.plot(label="Frame Rate", height=500, width=750, equal_aspects=True):
                 dpg.add_plot_axis(dpg.mvXAxis, label="x")
                 dpg.add_plot_axis(dpg.mvYAxis, label="y", tag="y_axis")
                 
@@ -69,22 +78,8 @@ class MainWindow:
                 #line_id = dpg.draw_line([0, 0], [self.video_width, self.video_height], color=[255, 0, 0])
                 self.roi_line = ROILine((50, 0), (50, self.video_height), (255, 0, 0))
 
-        with dpg.window(label="ROI Window", tag="ROIWindow"):
-            with dpg.plot(label="ROI Line", height=500, width=500, equal_aspects=True):
-                dpg.add_plot_axis(dpg.mvXAxis, label="x2")
-                dpg.add_plot_axis(dpg.mvYAxis, label="y2", tag="y_axis2")
 
-                # plot should be float lists
-                dummy_x = np.arange(0, self.video_width).astype(float)
-                dummy_y = np.zeros(self.video_width).astype(float)
-                
-
-                dpg.add_line_series(x=dummy_x, y=dummy_y, tag='line_series', parent='y_axis2')
-                
-               # self.ROI_data = dpg.add_line_series(x=np.arange(0, self.video_width), y=np.zeros(self.video_width), tag='line_series', parent='y_axis2')
-                
-
-        #dpg.set_primary_window("MainWindow", True)
+        dpg.set_primary_window("MainWindow", True)
 
         with dpg.handler_registry():
             dpg.add_key_press_handler(callback=self.key_press_callback)
@@ -117,48 +112,23 @@ class MainWindow:
         except Exception as e:
             logger.error(f"Error connecting to camera: {e}")
 
-    def _texture_update_worker(self):
-        """
-        Worker thread for updating texture in the background
-        """
-        frame_count = 0
-        
+    def _texture_update_worker(self):      
         while not self._stop_texture_update.is_set():
-            try:
-                # Wait for camera to signal new frame (with timeout to allow checking stop event)
-                if self.cam._frame_ready_event.wait(timeout=0.1):
-                    
-                    processed_frame = self.cam.get_processed_frame()
-                    if processed_frame is not None:
-                        
-                        frame_count += 1
-                        
-                        # Make a thread-safe copy and update texture
-                        with self._texture_lock:  
-                                                
-                            # get width and height of frame, check if they are the same as _video_width and _video_height and if not, update the texture size
-                            width, height = self.cam.get_resolution()
-                            if width != self.video_width or height != self.video_height:
-                                self.video_width = width
-                                self.video_height = height
-
-                                dpg.configure_item(self.texture, width=self.video_width, height=self.video_height)
-                                dpg.configure_item('image_series', bounds_min=(0, 0), bounds_max=(self.video_width, self.video_height))
-
-                            dpg.set_value(self.texture, processed_frame)
-                            
-                            # Log every 30 frames to track texture updates
-                            if frame_count % 30 == 0:
-                                logger.debug(f"Texture updated for frame {frame_count}")
-                            
-                        # get the position of the roi line
-            except Exception as e:
-                logger.error(f"Error in texture update worker: {e}")
-                # Continue running even if one frame fails
-            
-                    
+            processed_frame = self.frame_buffer.get_processed_frame()
+            if processed_frame is not None:
                 
-
+                dpg.set_value(self.texture, processed_frame)
+            
+    def start_button_callback(self, sender, app_data):
+        if sender == self.start_capture_button:
+            self.cam.start_capture()
+            self.image_processor.start()
+            logger.info("Started capture and image processing")
+        elif sender == self.stop_capture_button:
+            self.cam.stop_capture()
+            self.image_processor.stop()
+            logger.info("Stopped capture and image processing")
+      
     def start_texture_update_thread(self):
         """
         Start the texture update daemon thread
@@ -189,12 +159,14 @@ class MainWindow:
         try:
             # Stop texture update thread
             self.stop_texture_update_thread()
-            
-            # Stop capture and disconnect camera
-            if self.cam.is_capturing():
-                self.cam.stop_capture()
+            # Stop image processing thread
+            self.image_processor.stop()
+            # Stop capture
+            self.cam.stop_capture()
+            # Disconnect camera
             self.cam.disconnect()
-            logger.info("Cleaned up camera resources")
+            # Destroy context
+            dpg.destroy_context()
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
 
