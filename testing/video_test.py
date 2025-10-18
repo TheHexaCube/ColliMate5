@@ -29,9 +29,9 @@ class MainWindow:
         dpg.setup_dearpygui()
 
         
-        self.frame_buffer = FrameBuffer()
+        
         self.cam = CamManager(self.frame_buffer)
-        self.image_processor = ImageProcessor(self.frame_buffer)
+      
 
 
         dpg.set_viewport_vsync(False)
@@ -114,15 +114,16 @@ class MainWindow:
 
     def _texture_update_worker(self):      
         while not self._stop_texture_update.is_set():
-            processed_frame = self.frame_buffer.get_processed_frame()
-            if processed_frame is not None:
-                
+            if self.frame_buffer.is_data_available():
+                seq_num, processed_frame = self.frame_buffer.get_processed_frame()
                 dpg.set_value(self.texture, processed_frame)
+            else:
+                time.sleep(0.1)
             
     def start_button_callback(self, sender, app_data):
         if sender == self.start_capture_button:
             self.cam.start_capture()
-            self.image_processor.start()
+            
             logger.info("Started capture and image processing")
         elif sender == self.stop_capture_button:
             self.cam.stop_capture()
